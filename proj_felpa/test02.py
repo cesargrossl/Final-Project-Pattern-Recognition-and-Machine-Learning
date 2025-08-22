@@ -1,6 +1,8 @@
-# test01.py — Detector treinado com exemplos em dataset/falhas e contador por peça em dataset/analisar.
+# test02.py — Detector treinado com exemplos em dataset/falhas e contador por peça em dataset/analisar.
 # Saída principal: outputs/resumo.csv com "imagem,detectadas".
 # Mantém overlays apenas para conferência.
+#O modelo que está sendo usado é um One-Class Support Vector Machine (SVM) com kernel RBF, aplicado sobre atributos de textura (Gabor, LBP e FFT).
+#👉 Ele pertence à família de métodos de detecção de anomalias em reconhecimento de padrões.
 
 import warnings
 warnings.filterwarnings("ignore", message="Applying `local_binary_pattern`")
