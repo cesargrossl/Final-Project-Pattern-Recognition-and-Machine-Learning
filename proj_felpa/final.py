@@ -1,11 +1,12 @@
-# final.py — Detector de falhas por textura (Gabor+LBP+FFT) com OC-SVM + heatmap e caixas
+# final.py — Detector de falhas por textura (Gabor+LBP+FFT) com OC-SVM + ROI + heatmap e caixas
 # Pastas:
-#   dataset/falhas/    -> exemplos (patches) de falha (inclua o recorte enviado)
+#   dataset/falhas/    -> exemplos (patches) de falha
 #   dataset/analisar/  -> imagens a inspecionar
 # Saídas (em outputs/):
 #   - *_overlay.png
 #   - *_overlay_boxes.png
 #   - *_heat_legend.png
+#   - *_overlay_roi.png      (overlay mostrando a ROI usada)
 #   - resumo.csv
 
 import warnings
@@ -50,6 +51,25 @@ GABOR_FREQS  = [0.05, 0.10, 0.20]
 THRESH  = 0.80          # score (0..1) para desenhar caixa
 TOPK    = 12            # no máx. N caixas
 NMS_IOU = 0.25          # NMS IoU
+
+# ========================
+# ROI (Região de Interesse)
+# ========================
+# MODOS:
+#   ROI_MODE = None           -> não usa ROI (analisa a imagem toda)
+#   ROI_MODE = "manual_px"    -> defina ROI_PX = (x1,y1,x2,y2) em pixels
+#   ROI_MODE = "manual_rel"   -> defina ROI_REL = (x1,y1,x2,y2) em frações [0..1] da imagem
+ROI_MODE = "manual_rel"
+
+# Exemplo pedido: “apenas a área da ESQUERDA” (ajuste conforme sua peça)
+# Aqui: da borda esquerda até 25% da largura, altura inteira.
+ROI_REL = (0.00, 0.00, 0.25, 1.00)
+
+# Alternativa em pixels (se preferir):
+ROI_PX  = (0, 0, 300, 10_000)  # x1,y1,x2,y2 (x2/y2 serão cortados para o tamanho real)
+
+# Um patch só é considerado se pelo menos essa fração ficar dentro da ROI
+ROI_MIN_COVER = 0.60
 
 # ========================
 # Utilidades
@@ -168,6 +188,55 @@ def nms(boxes, scores, iou_thr=NMS_IOU, topk=TOPK):
         idxs = np.array(remain, dtype=int)
     return keep
 
+# ---------- ROI helpers ----------
+def build_roi_mask_for_image(img_rgb):
+    """Cria máscara binária (uint8) com 1 dentro da ROI e 0 fora."""
+    H, W = img_rgb.shape[:2]
+    mask = np.zeros((H, W), dtype=np.uint8)
+    if ROI_MODE is None:
+        mask[:] = 1
+        return mask
+
+    if ROI_MODE == "manual_px":
+        x1, y1, x2, y2 = ROI_PX
+        x1 = max(0, min(W, x1)); x2 = max(0, min(W, x2))
+        y1 = max(0, min(H, y1)); y2 = max(0, min(H, y2))
+        if x2 > x1 and y2 > y1:
+            mask[y1:y2, x1:x2] = 1
+        return mask
+
+    if ROI_MODE == "manual_rel":
+        rx1, ry1, rx2, ry2 = ROI_REL
+        x1 = int(np.clip(rx1, 0, 1) * W)
+        y1 = int(np.clip(ry1, 0, 1) * H)
+        x2 = int(np.clip(rx2, 0, 1) * W)
+        y2 = int(np.clip(ry2, 0, 1) * H)
+        x1 = max(0, min(W, x1)); x2 = max(0, min(W, x2))
+        y1 = max(0, min(H, y1)); y2 = max(0, min(H, y2))
+        if x2 > x1 and y2 > y1:
+            mask[y1:y2, x1:x2] = 1
+        return mask
+
+    # fallback: sem ROI
+    mask[:] = 1
+    return mask
+
+def grid_valid_mask(mask, ny, nx, ph=PATCH_H, pw=PATCH_W, sy=STRIDE_Y, sx=STRIDE_X, min_cover=ROI_MIN_COVER):
+    """Retorna grade booleana ny×nx indicando se o patch cobre >= min_cover da ROI."""
+    H, W = mask.shape
+    valid = np.zeros((ny, nx), dtype=bool)
+    for iy in range(ny):
+        for ix in range(nx):
+            y0, x0 = iy*sy, ix*sx
+            ys, xs = slice(y0, y0+ph), slice(x0, x0+pw)
+            tile = mask[ys, xs]
+            if tile.size == 0 or tile.shape[0] != ph or tile.shape[1] != pw:
+                continue
+            cover = tile.mean()  # como 0/1, a média = fração coberta
+            if cover >= min_cover:
+                valid[iy, ix] = True
+    return valid
+
 # ========================
 # Treino e inferência
 # ========================
@@ -199,10 +268,10 @@ def train_model_from_falhas():
     oc = OneClassSVM(kernel="rbf", nu=NU, gamma=GAMMA).fit(Xs)
     return scaler, oc
 
-def score_image(scaler, oc, rgb):
+def score_image(scaler, oc, rgb, roi_mask):
     patches, grid, coords = extract_patches_rect(rgb)
     if len(patches) == 0:
-        return None, None, None, None, None
+        return None, None, None, None, None, None
     X = np.vstack([feats_for_patch(px) for px in patches])
     Xs = scaler.transform(X)
     d = oc.decision_function(Xs).ravel()  # >0 mais parecido com falhas
@@ -216,7 +285,13 @@ def score_image(scaler, oc, rgb):
     score = np.clip(score, 0, 1)
 
     ny, nx = grid
-    return score.reshape(ny, nx), ny, nx, coords, score
+    score_grid = score.reshape(ny, nx)
+
+    # Aplica ROI: zera score fora da ROI (com cobertura insuficiente)
+    valid = grid_valid_mask(roi_mask, ny, nx)
+    score_grid[~valid] = 0.0
+
+    return score_grid, ny, nx, coords, score, valid
 
 def run():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -229,7 +304,7 @@ def run():
 
     with open(OUT_DIR / "resumo.csv", "w", newline="", encoding="utf-8") as fcsv:
         w = csv.writer(fcsv)
-        w.writerow(["imagem", "detectadas", "thr", "patch", "stride"])
+        w.writerow(["imagem", "detectadas", "thr", "patch", "stride", "roi_mode", "roi"])
 
         print(f"Analisando {len(analis)} imagem(ns) em {DIR_ANALIS.name}/")
         for p in analis:
@@ -239,17 +314,27 @@ def run():
                 continue
             rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
-            score_grid, ny, nx, coords, flat_scores = score_image(scaler, oc, rgb)
+            # ROI para esta imagem
+            roi_mask = build_roi_mask_for_image(rgb)
+
+            score_grid, ny, nx, coords, flat_scores, valid = score_image(scaler, oc, rgb, roi_mask)
             if score_grid is None:
                 print(f"[AVISO] {p.name}: sem patches extraídos.")
                 continue
 
             heat, overlay = heatmap_to_image(score_grid, rgb)
 
-            # Caixas onde score >= THRESH
+            # desenha contorno da ROI no overlay (debug)
+            overlay_roi = overlay.copy()
+            cnts, _ = cv2.findContours((roi_mask*255).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(overlay_roi, cnts, -1, (0, 255, 255), 2)  # amarelo
+
+            # Caixas onde score >= THRESH (e apenas onde valid=True)
             boxes, scores = [], []
             for iy in range(ny):
                 for ix in range(nx):
+                    if not valid[iy, ix]:
+                        continue
                     s = float(score_grid[iy, ix])
                     if s >= THRESH:
                         y0, x0 = iy * STRIDE_Y, ix * STRIDE_X
@@ -257,7 +342,7 @@ def run():
                         scores.append(s)
 
             keep_idx = nms(boxes, scores, iou_thr=NMS_IOU, topk=TOPK) if boxes else []
-            overlay_boxes = overlay.copy()
+            overlay_boxes = overlay_roi.copy()
             for i in keep_idx:
                 x1, y1, x2, y2 = map(int, boxes[i])
                 cv2.rectangle(overlay_boxes, (x1, y1), (x2, y2), (255, 0, 0), 2)
@@ -267,9 +352,11 @@ def run():
             # salvar imagens
             out_overlay       = OUT_DIR / f"{p.stem}_overlay.png"
             out_overlay_boxes = OUT_DIR / f"{p.stem}_overlay_boxes.png"
+            out_overlay_roi   = OUT_DIR / f"{p.stem}_overlay_roi.png"
             out_heat_legend   = OUT_DIR / f"{p.stem}_heat_legend.png"
 
             cv2.imwrite(str(out_overlay), cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
+            cv2.imwrite(str(out_overlay_roi), cv2.cvtColor(overlay_roi, cv2.COLOR_RGB2BGR))
             cv2.imwrite(str(out_overlay_boxes), cv2.cvtColor(overlay_boxes, cv2.COLOR_RGB2BGR))
 
             # Heatmap com barra de cores
@@ -280,9 +367,10 @@ def run():
             plt.axis("off"); plt.colorbar(im, fraction=0.046, pad=0.04)
             plt.tight_layout(); plt.savefig(out_heat_legend, dpi=150); plt.close()
 
-            print(f"Salvo: {out_overlay} | {out_overlay_boxes} | {out_heat_legend}")
+            print(f"Salvo: {out_overlay} | {out_overlay_roi} | {out_overlay_boxes} | {out_heat_legend}")
             w.writerow([p.name, len(keep_idx), THRESH,
-                        f"{PATCH_H}x{PATCH_W}", f"{STRIDE_Y}x{STRIDE_X}"])
+                        f"{PATCH_H}x{PATCH_W}", f"{STRIDE_Y}x{STRIDE_X}",
+                        ROI_MODE, (ROI_REL if ROI_MODE=='manual_rel' else ROI_PX)])
 
 if __name__ == "__main__":
     run()
