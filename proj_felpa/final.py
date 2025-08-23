@@ -48,7 +48,7 @@ GABOR_THETAS = [0, np.pi/6, np.pi/3, np.pi/2, 2*np.pi/3, 5*np.pi/6]
 GABOR_FREQS  = [0.05, 0.10, 0.20]
 
 # Pós-processamento
-THRESH  = 0.80          # score (0..1) para desenhar caixa
+THRESH  = 0.70          # score (0..1) para desenhar caixa
 TOPK    = 12            # no máx. N caixas
 NMS_IOU = 0.25          # NMS IoU
 
@@ -59,22 +59,15 @@ NMS_IOU = 0.25          # NMS IoU
 #   ROI_MODE = None           -> não usa ROI (analisa a imagem toda)
 #   ROI_MODE = "manual_px"    -> defina ROI_PX = (x1,y1,x2,y2) em pixels
 #   ROI_MODE = "manual_rel"   -> defina ROI_REL = (x1,y1,x2,y2) em frações [0..1] da imagem
-ROI_MODE = "manual_rel"
-
-# Exemplo pedido: “apenas a área da ESQUERDA” (ajuste conforme sua peça)
-# Aqui: da borda esquerda até 25% da largura, altura inteira.
-ROI_REL = (0.00, 0.00, 0.25, 1.00)
-
-# Alternativa em pixels (se preferir):
-ROI_PX  = (0, 0, 300, 10_000)  # x1,y1,x2,y2 (x2/y2 serão cortados para o tamanho real)
-
-# Um patch só é considerado se pelo menos essa fração ficar dentro da ROI
-ROI_MIN_COVER = 0.60
+ROI_MODE = "manual_px"
+ROI_PX   = (1, 1, 144, 421)         # <<---- sua ROI medida
+ROI_REL  = (0.00, 0.00, 1.00, 1.00) # ignorado quando usamos manual_px
 
 # ========================
 # Utilidades
 # ========================
 def imread_unicode(path: Path):
+    """Leitura robusta a caminhos com acentos (Windows)."""
     data = np.fromfile(str(path), dtype=np.uint8)
     if data.size == 0:
         return None
@@ -217,24 +210,22 @@ def build_roi_mask_for_image(img_rgb):
             mask[y1:y2, x1:x2] = 1
         return mask
 
-    # fallback: sem ROI
     mask[:] = 1
     return mask
 
-def grid_valid_mask(mask, ny, nx, ph=PATCH_H, pw=PATCH_W, sy=STRIDE_Y, sx=STRIDE_X, min_cover=ROI_MIN_COVER):
-    """Retorna grade booleana ny×nx indicando se o patch cobre >= min_cover da ROI."""
+def grid_valid_mask(mask, ny, nx, ph=PATCH_H, pw=PATCH_W, sy=STRIDE_Y, sx=STRIDE_X):
+    """
+    Marca como válido se o CENTRO do patch cair dentro da ROI.
+    Mais robusto quando a ROI é estreita (como no seu caso).
+    """
     H, W = mask.shape
     valid = np.zeros((ny, nx), dtype=bool)
     for iy in range(ny):
         for ix in range(nx):
-            y0, x0 = iy*sy, ix*sx
-            ys, xs = slice(y0, y0+ph), slice(x0, x0+pw)
-            tile = mask[ys, xs]
-            if tile.size == 0 or tile.shape[0] != ph or tile.shape[1] != pw:
-                continue
-            cover = tile.mean()  # como 0/1, a média = fração coberta
-            if cover >= min_cover:
-                valid[iy, ix] = True
+            cy = iy*sy + ph//2
+            cx = ix*sx + pw//2
+            if 0 <= cy < H and 0 <= cx < W:
+                valid[iy, ix] = (mask[cy, cx] == 1)
     return valid
 
 # ========================
@@ -287,7 +278,7 @@ def score_image(scaler, oc, rgb, roi_mask):
     ny, nx = grid
     score_grid = score.reshape(ny, nx)
 
-    # Aplica ROI: zera score fora da ROI (com cobertura insuficiente)
+    # Aplica ROI: zera score fora da ROI (centro do patch fora)
     valid = grid_valid_mask(roi_mask, ny, nx)
     score_grid[~valid] = 0.0
 
@@ -329,7 +320,7 @@ def run():
             cnts, _ = cv2.findContours((roi_mask*255).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             cv2.drawContours(overlay_roi, cnts, -1, (0, 255, 255), 2)  # amarelo
 
-            # Caixas onde score >= THRESH (e apenas onde valid=True)
+            # Caixas onde score >= THRESH (apenas onde valid=True)
             boxes, scores = [], []
             for iy in range(ny):
                 for ix in range(nx):
@@ -370,7 +361,7 @@ def run():
             print(f"Salvo: {out_overlay} | {out_overlay_roi} | {out_overlay_boxes} | {out_heat_legend}")
             w.writerow([p.name, len(keep_idx), THRESH,
                         f"{PATCH_H}x{PATCH_W}", f"{STRIDE_Y}x{STRIDE_X}",
-                        ROI_MODE, (ROI_REL if ROI_MODE=='manual_rel' else ROI_PX)])
+                        ROI_MODE, (ROI_PX if ROI_MODE=='manual_px' else ROI_REL)])
 
 if __name__ == "__main__":
     run()
