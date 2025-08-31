@@ -1,9 +1,6 @@
 # ---------------------------------------------------------------
-# test01_fixed.py — Detector de falhas por textura (Gabor + LBP + FFT + GLCM)
+#  Detector de falhas por textura (Gabor + LBP + FFT + GLCM)
 # OC-SVM + multi-escala fixo [(96,48), (64,32), (48,24)]
-# Melhorias: treino multi-escala, GLCM features, stats extras, resize para imagens pequenas
-# Correção: atualizado imports para scikit-image (graycomatrix, graycoprops)
-# Correção: resolvido conflito de nome com 'stats' em feats_for_patch
 # ---------------------------------------------------------------
 
 import warnings
