@@ -42,8 +42,8 @@ LBP_R = 1
 RPS_BINS = 8  # Reduzido de 16
 
 # Pós-processamento
-THR_PERC = 75
-MIN_BOX = 0.02
+THR_PERC = 90
+MIN_BOX = 0.002
 NMS_IOU = 0.25
 VERBOSE = True
 
